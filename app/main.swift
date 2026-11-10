@@ -1,46 +1,14 @@
 // PDFPrintPrepare — macOS-приложение: перетащите PDF, получите пакеты для печати.
-// Собирается: swiftc -O PDFPrintPrepare.swift -o PDFPrintPrepare.app/Contents/MacOS/PDFPrintPrepare
+// Без внешних зависимостей: только системные PDFKit и Vision (OCR).
+//
+// Сборка: bash build_app.sh
 
 import Cocoa
-
-// ─────────────────────────── настройки поиска инструментов ───────────────────
-let pythonCandidates = [
-    "/opt/homebrew/bin/python3",
-    "/opt/homebrew/opt/python@3.13/bin/python3.13",
-    "/opt/homebrew/opt/python@3.12/bin/python3.12",
-    "/opt/homebrew/opt/python@3.11/bin/python3.11",
-    "/usr/local/bin/python3",
-    "/usr/bin/python3",
-    NSHomeDirectory() + "/.pyenv/shims/python3",
-]
-
-/// Быстрая проверка: есть ли в интерпретаторе PyMuPDF (без login-shell).
-func findPython() -> String? {
-    for path in pythonCandidates {
-        guard FileManager.default.isExecutableFile(atPath: path) else { continue }
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: path)
-        task.arguments = ["-c", "import fitz"]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            task.waitUntilExit()
-            if task.terminationStatus == 0 { return path }
-        } catch { continue }
-    }
-    return nil
-}
-
-func hasTesseract() -> Bool {
-    let paths = ["/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract", "/usr/bin/tesseract"]
-    return paths.contains { FileManager.default.isExecutableFile(atPath: $0) }
-}
 
 // ─────────────────────────── зона drag & drop ───────────────────────────────
 final class DropView: NSView {
     var onFiles: (([URL]) -> Void)?
-    private var highlighted = false { didSet { needsDisplay = true } }
+    private var highlighted = false { didSet { updateAppearance() } }
     private let label = NSTextField(labelWithString: "Перетащите сюда PDF\nили нажмите, чтобы выбрать")
     private let icon = NSImageView()
 
@@ -48,11 +16,10 @@ final class DropView: NSView {
         super.init(frame: frame)
         wantsLayer = true
         layer?.cornerRadius = 12
-        layer?.borderWidth = 2
         registerForDraggedTypes([.fileURL])
 
         icon.image = NSImage(systemSymbolName: "doc.badge.plus", accessibilityDescription: nil)
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 42, weight: .regular)
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 40, weight: .regular)
         icon.contentTintColor = .secondaryLabelColor
         icon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -65,7 +32,7 @@ final class DropView: NSView {
         addSubview(icon); addSubview(label)
         NSLayoutConstraint.activate([
             icon.centerXAnchor.constraint(equalTo: centerXAnchor),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -24),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -22),
             label.centerXAnchor.constraint(equalTo: centerXAnchor),
             label.topAnchor.constraint(equalTo: icon.bottomAnchor, constant: 10),
             label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -24),
@@ -81,11 +48,10 @@ final class DropView: NSView {
         layer?.backgroundColor = (highlighted ? NSColor.controlAccentColor.withAlphaComponent(0.10)
                                               : NSColor.textBackgroundColor).cgColor
         layer?.borderWidth = highlighted ? 3 : 2
-        if let l = layer, highlighted { l.borderWidth = 3 }
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if pdfURLs(from: sender).isEmpty { return [] }
+        guard !pdfURLs(from: sender).isEmpty else { return [] }
         highlighted = true
         return .copy
     }
@@ -123,21 +89,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     let dropView = DropView(frame: .zero)
     let logView = NSTextView()
-    let spinner = NSProgressIndicator()
+    let progressBar = NSProgressIndicator()
     let runButton = NSButton(title: "Обработать", target: nil, action: nil)
     let openButton = NSButton(title: "Открыть папку результата", target: nil, action: nil)
     let copiesField = NSTextField(string: "4")
     let printerField = NSTextField(string: "")
-    let printNow = NSButton(checkboxWithTitle: "Печатать сразу (если принтер подключён)", target: nil, action: nil)
+    let printNow = NSButton(checkboxWithTitle: "Печатать сразу (если принтер подключён)",
+                            target: nil, action: nil)
 
     var queue: [URL] = []
     var currentFile: URL?
     var currentOutDir: URL?
     var running = false { didSet { updateControls() } }
-    var pythonPath: String = ""
     var uiReady = false
 
-    // запуск через "Открыть с помощью" / перетаскивание на иконку
+    // ── события системы ─────────────────────────────────────────────────────
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
         let urls = filenames.map { URL(fileURLWithPath: $0) }
             .filter { $0.pathExtension.lowercased() == "pdf" }
@@ -145,29 +111,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         enqueue(urls)
     }
 
-    func applicationWillFinishLaunching(_ notification: Notification) {
-        // Определяем интерпретатор до openFiles — Finder присылает файлы очень рано
-        pythonPath = findPython() ?? ""
-    }
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildUI()
         NSApp.activate(ignoringOtherApps: true)
-        if pythonPath.isEmpty { pythonPath = findPython() ?? "" }
         uiReady = true
         if !queue.isEmpty && !running { startNext() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    // ── UI ─────────────────────────────────────────────────────────────────
+    // ── UI ──────────────────────────────────────────────────────────────────
     func buildUI() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 580),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 600),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
-        window.title = "Подготовка PDF к печати"
+        window.title = "PDF к печати"
         window.minSize = NSSize(width: 660, height: 520)
-        // Центрируем на основном дисплее (у пользователя их несколько)
         if let screen = NSScreen.screens.first {
             let vf = screen.visibleFrame
             let size = window.frame.size
@@ -203,7 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let printerLabel = NSTextField(labelWithString: "Принтер (необязательно):")
         printerField.placeholderString = "например HP_LaserJet_M404"
         printerField.translatesAutoresizingMaskIntoConstraints = false
-        printerField.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        printerField.widthAnchor.constraint(equalToConstant: 190).isActive = true
         let printerRow = NSStackView(views: [printerLabel, printerField])
         printerRow.orientation = .horizontal
         printerRow.spacing = 6
@@ -220,16 +179,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openButton.isEnabled = false
         openButton.translatesAutoresizingMaskIntoConstraints = false
 
-        spinner.style = .spinning
-        spinner.controlSize = .small
-        spinner.isDisplayedWhenStopped = false
-        spinner.translatesAutoresizingMaskIntoConstraints = false
-
-        let controls = NSStackView(views: [settingsRow, printerRow, printNow, NSView(), spinner, openButton, runButton])
+        let controls = NSStackView(views: [settingsRow, printerRow, printNow, NSView(),
+                                           openButton, runButton])
         controls.orientation = .horizontal
         controls.spacing = 12
         controls.alignment = .centerY
         controls.translatesAutoresizingMaskIntoConstraints = false
+
+        // Прогресс
+        progressBar.style = .bar
+        progressBar.isIndeterminate = false
+        progressBar.minValue = 0
+        progressBar.maxValue = 1
+        progressBar.doubleValue = 0
+        progressBar.isHidden = true
+        progressBar.translatesAutoresizingMaskIntoConstraints = false
 
         // Лог
         let scroll = NSScrollView()
@@ -246,28 +210,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logView.textContainer?.widthTracksTextView = true
         scroll.documentView = logView
 
-        for v in [dropView, controls, scroll] { content.addSubview(v) }
+        for v in [dropView, controls, progressBar, scroll] { content.addSubview(v) }
 
         NSLayoutConstraint.activate([
             dropView.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
             dropView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
             dropView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            dropView.heightAnchor.constraint(equalToConstant: 160),
+            dropView.heightAnchor.constraint(equalToConstant: 150),
 
-            controls.topAnchor.constraint(equalTo: dropView.bottomAnchor, constant: 16),
+            controls.topAnchor.constraint(equalTo: dropView.bottomAnchor, constant: 14),
             controls.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
             controls.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
 
-            scroll.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 14),
+            progressBar.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 12),
+            progressBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            progressBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+
+            scroll.topAnchor.constraint(equalTo: progressBar.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
             scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
         ])
 
-        appendLog("Готово. Перетащите PDF в окно — приложение разложит его на пакеты печати.\n")
-        appendLog("Проверка окружения:\n")
-        appendLog("  python3   : \(pythonPath.isEmpty ? "не найден с PyMuPDF ⚠️" : pythonPath)\n")
-        appendLog("  tesseract : \(hasTesseract() ? "найден" : "не найден ⚠️")\n")
+        appendLog("Перетащите PDF в окно — приложение разложит документ на пакеты печати.\n")
+        appendLog("Акты пойдут на двустороннюю печать, листы А3 — отдельным заданием.\n")
     }
 
     @objc func stepperChanged(_ s: NSStepper) {
@@ -275,33 +241,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func updateControls() {
-        // «Обработать» активна, пока есть очередь или есть с чем перезапуститься
         runButton.isEnabled = !running && (!queue.isEmpty || currentFile != nil)
-        dropView.alphaValue = running ? 0.5 : 1
+        dropView.alphaValue = running ? 0.55 : 1
     }
 
-    // ── очередь ────────────────────────────────────────────────────────────
+    // ── очередь ─────────────────────────────────────────────────────────────
     func enqueue(_ urls: [URL]) {
         queue.append(contentsOf: urls)
-        // UI может быть ещё не построен (Finder присылает файлы раньше окна)
         if uiReady && !running { startNext() }
     }
 
     func startNext() {
         guard !queue.isEmpty else { running = false; return }
-        // openFiles может прийти раньше didFinishLaunching — определяем интерпретатор лениво
-        if pythonPath.isEmpty || !FileManager.default.isExecutableFile(atPath: pythonPath) {
-            pythonPath = findPython() ?? ""
-        }
-        guard !pythonPath.isEmpty else {
-            showDependencyAlert(pythonMissing: true, tesseractMissing: !hasTesseract())
-            // очередь НЕ чистим: после установки зависимостей «Обработать» повторит попытку
-            updateControls(); return
-        }
-        guard hasTesseract() else {
-            showDependencyAlert(pythonMissing: false, tesseractMissing: true)
-            updateControls(); return
-        }
 
         let file = queue.removeFirst()
         currentFile = file
@@ -310,73 +261,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openButton.isEnabled = false
 
         running = true
-        spinner.startAnimation(nil)
-        appendLog("\n══════════════════════════════════════════\n")
-        appendLog("Файл: \(file.lastPathComponent)\n")
+        progressBar.isHidden = false
+        progressBar.isIndeterminate = true
+        progressBar.startAnimation(nil)
 
-        guard let script = Bundle.main.path(forResource: "pdf_print_analyzer", ofType: "py") else {
-            appendLog("❌ Внутренняя ошибка: скрипт не найден в бандле\n")
-            running = false; spinner.stopAnimation(nil); return
-        }
+        appendLog("\n════════════════════════════════════════════\n")
 
-        var args = [script, file.path, "--copies", copiesField.stringValue]
+        let copies = max(1, Int(copiesField.stringValue) ?? 4)
         let printer = printerField.stringValue.trimmingCharacters(in: .whitespaces)
-        if !printer.isEmpty { args += ["--printer", printer] }
 
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: pythonPath)
-        task.arguments = ["-u"] + args   // -u: без буферизации, лог идёт в реальном времени
-        var env = ProcessInfo.processInfo.environment
-        env["PYTHONUNBUFFERED"] = "1"
-        task.environment = env
-
-        let outPipe = Pipe(), errPipe = Pipe()
-        task.standardOutput = outPipe
-        task.standardError = errPipe
-
-        outPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
-            DispatchQueue.main.async { self?.appendLog(s) }
-        }
-        errPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
-            DispatchQueue.main.async { self?.appendLog("⚠️ " + s) }
-        }
-
-        task.terminationHandler = { [weak self] proc in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                outPipe.fileHandleForReading.readabilityHandler = nil
-                errPipe.fileHandleForReading.readabilityHandler = nil
-                self.spinner.stopAnimation(nil)
-                self.running = false
-
-                if proc.terminationStatus == 0 {
-                    self.appendLog("\n✅ Готово. Папка: \(self.currentOutDir?.lastPathComponent ?? "")\n")
-                    self.openButton.isEnabled = true
-                    if self.printNow.state == .on { self.runPrintScript() }
-                } else {
-                    self.appendLog("\n❌ Ошибка (код \(proc.terminationStatus))\n")
+        let analyzer = Analyzer { [weak self] message in
+            guard let self = self else { return }
+            self.appendLog(message + "\n")
+            if message.contains("распознано") {
+                let parts = message.split(separator: " ").last?.split(separator: "/")
+                if let parts = parts, parts.count == 2,
+                   let done = Double(parts[0]), let total = Double(parts[1]), total > 0 {
+                    self.progressBar.isIndeterminate = false
+                    self.progressBar.stopAnimation(nil)
+                    self.progressBar.doubleValue = done / total
                 }
-                if !self.queue.isEmpty { self.startNext() }
+            }
+            if message.contains("Пакеты записаны") {
+                self.progressBar.isIndeterminate = false
+                self.progressBar.stopAnimation(nil)
+                self.progressBar.doubleValue = 1
             }
         }
 
-        do {
-            try task.run()
-        } catch {
-            appendLog("❌ Не удалось запустить: \(error.localizedDescription)\n")
-            running = false; spinner.stopAnimation(nil)
+        analyzer.analyze(pdfURL: file, copies: copies, printer: printer) { [weak self] result in
+            guard let self = self else { return }
+            self.running = false
+            self.progressBar.stopAnimation(nil)
+            self.progressBar.isHidden = true
+            self.progressBar.doubleValue = 0
+
+            switch result {
+            case .success(let summary):
+                self.appendLog("\nГотово: \(summary.pages) стр., актов \(summary.actPairs), "
+                               + "листов А3 \(summary.a3Sheets), пакетов \(summary.groups) "
+                               + String(format: "(%.0f с)\n", summary.seconds))
+                self.appendLog("Папка: \(summary.outDir.lastPathComponent)\n")
+                self.openButton.isEnabled = true
+                NSWorkspace.shared.activateFileViewerSelecting([summary.outDir])
+                if self.printNow.state == .on { self.runPrintScript(at: summary.outDir) }
+            case .failure(let error):
+                self.appendLog("\nОшибка: \(error.localizedDescription)\n")
+                let alert = NSAlert()
+                alert.messageText = "Не удалось обработать файл"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
+
+            if !self.queue.isEmpty { self.startNext() }
         }
     }
 
-    func runPrintScript() {
-        guard let dir = currentOutDir else { return }
+    func runPrintScript(at dir: URL) {
         let sh = dir.appendingPathComponent("print_commands.sh")
         guard FileManager.default.fileExists(atPath: sh.path) else { return }
-        appendLog("\n🖨  Отправляю пакеты на принтер...\n")
+        appendLog("\nОтправляю пакеты на принтер...\n")
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
         task.arguments = [sh.path]
@@ -393,8 +338,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 pipe.fileHandleForReading.readabilityHandler = nil
                 self?.appendLog(p.terminationStatus == 0
-                                ? "🖨  Задания отправлены в очередь печати.\n"
-                                : "⚠️  Печать завершилась с кодом \(p.terminationStatus)\n")
+                                ? "Задания отправлены в очередь печати.\n"
+                                : "Печать завершилась с кодом \(p.terminationStatus)\n")
             }
         }
         try? task.run()
@@ -402,7 +347,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func runTapped() {
         if !queue.isEmpty { startNext(); return }
-        // повторный запуск того же файла (результаты лягут в ту же папку)
         if let f = currentFile { queue.append(f); startNext() }
     }
 
@@ -417,58 +361,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
                          .foregroundColor: NSColor.textColor]))
         logView.scrollToEndOfDocument(nil)
-    }
-
-    func alert(_ title: String, _ text: String) {
-        let a = NSAlert()
-        a.messageText = title
-        a.informativeText = text
-        a.alertStyle = .warning
-        a.runModal()
-    }
-
-    /// Диалог про отсутствующие зависимости с кнопкой установки.
-    func showDependencyAlert(pythonMissing: Bool, tesseractMissing: Bool) {
-        let a = NSAlert()
-        a.messageText = pythonMissing ? "Не найден python3 с PyMuPDF"
-                                      : "Не найден tesseract (OCR)"
-        var lines: [String] = []
-        if pythonMissing { lines.append("• pip3 install --user pymupdf") }
-        if tesseractMissing { lines.append("• brew install tesseract tesseract-lang") }
-        a.informativeText = lines.joined(separator: "\n")
-            + "\n\nМожно установить сразу — откроется Терминал и выполнит команду."
-        a.alertStyle = .warning
-        a.addButton(withTitle: "Установить сейчас")
-        a.addButton(withTitle: "Отмена")
-        if a.runModal() == .alertFirstButtonReturn {
-            installDependencies(pythonMissing: pythonMissing, tesseractMissing: tesseractMissing)
-        }
-    }
-
-    /// Открывает Терминал с установкой того, чего не хватает.
-    func installDependencies(pythonMissing: Bool, tesseractMissing: Bool) {
-        var cmds: [String] = []
-        if pythonMissing {
-            cmds.append("/usr/bin/python3 -m pip install --user pymupdf")
-            cmds.append("/opt/homebrew/bin/python3 -m pip install pymupdf 2>/dev/null || true")
-        }
-        if tesseractMissing {
-            if FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/brew") {
-                cmds.append("/opt/homebrew/bin/brew install tesseract tesseract-lang")
-            } else {
-                cmds.append("echo 'Homebrew не найден. Установите с https://brew.sh, затем повторите.'")
-            }
-        }
-        guard !cmds.isEmpty else { return }
-        let script = cmds.joined(separator: " ; ")
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let apple = "tell application \"Terminal\"\nactivate\ndo script \"\(script)\"\nend tell"
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", apple]
-        try? p.run()
-        appendLog("\n🛠  Открыт Терминал с установкой. Дождитесь окончания и нажмите «Обработать» ещё раз.\n")
     }
 }
 

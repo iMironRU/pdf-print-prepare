@@ -16,14 +16,15 @@ python3 scripts/make_icon.py
 
 echo "▸ Компиляция Swift (arm64 + x86_64)"
 mkdir -p build/tmp
+SWIFT_SOURCES=(app/main.swift app/Analyzer.swift)
 swiftc -O -swift-version 5 \
     -target arm64-apple-macos12.0 \
-    app/PDFPrintPrepare.swift -o build/tmp/app-arm64 \
-    -framework Cocoa
+    "${SWIFT_SOURCES[@]}" -o build/tmp/app-arm64 \
+    -framework Cocoa -framework PDFKit -framework Vision
 swiftc -O -swift-version 5 \
     -target x86_64-apple-macos12.0 \
-    app/PDFPrintPrepare.swift -o build/tmp/app-x86_64 \
-    -framework Cocoa
+    "${SWIFT_SOURCES[@]}" -o build/tmp/app-x86_64 \
+    -framework Cocoa -framework PDFKit -framework Vision
 lipo -create build/tmp/app-arm64 build/tmp/app-x86_64 \
      -output "$APP/Contents/MacOS/PDFPrintPrepare"
 strip -x "$APP/Contents/MacOS/PDFPrintPrepare" || true
@@ -31,7 +32,7 @@ strip -x "$APP/Contents/MacOS/PDFPrintPrepare" || true
 echo "▸ Ресурсы"
 cp app/Info.plist "$APP/Contents/Info.plist"
 cp app/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
-cp pdf_print_analyzer.py "$APP/Contents/Resources/pdf_print_analyzer.py"
+# python-скрипт больше не нужен приложению (всё на Swift), но оставлен для CLI/Linux
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "▸ Подпись (ad-hoc)"
