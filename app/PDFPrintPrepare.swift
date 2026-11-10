@@ -6,8 +6,12 @@ import Cocoa
 // ─────────────────────────── настройки поиска инструментов ───────────────────
 let pythonCandidates = [
     "/opt/homebrew/bin/python3",
+    "/opt/homebrew/opt/python@3.13/bin/python3.13",
+    "/opt/homebrew/opt/python@3.12/bin/python3.12",
+    "/opt/homebrew/opt/python@3.11/bin/python3.11",
     "/usr/local/bin/python3",
     "/usr/bin/python3",
+    NSHomeDirectory() + "/.pyenv/shims/python3",
 ]
 
 /// Быстрая проверка: есть ли в интерпретаторе PyMuPDF (без login-shell).
@@ -261,12 +265,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ])
 
         appendLog("Готово. Перетащите PDF в окно — приложение разложит его на пакеты печати.\n")
-        if pythonPath.isEmpty {
-            appendLog("⚠️  Не найден python3 с PyMuPDF. Установите:  pip3 install pymupdf\n")
-        }
-        if !hasTesseract() {
-            appendLog("⚠️  Не найден tesseract. Установите:  brew install tesseract tesseract-lang\n")
-        }
+        appendLog("Проверка окружения:\n")
+        appendLog("  python3   : \(pythonPath.isEmpty ? "не найден с PyMuPDF ⚠️" : pythonPath)\n")
+        appendLog("  tesseract : \(hasTesseract() ? "найден" : "не найден ⚠️")\n")
     }
 
     @objc func stepperChanged(_ s: NSStepper) {
@@ -289,16 +290,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func startNext() {
         guard !queue.isEmpty else { running = false; return }
         // openFiles может прийти раньше didFinishLaunching — определяем интерпретатор лениво
-        if pythonPath.isEmpty { pythonPath = findPython() ?? "" }
+        if pythonPath.isEmpty || !FileManager.default.isExecutableFile(atPath: pythonPath) {
+            pythonPath = findPython() ?? ""
+        }
         guard !pythonPath.isEmpty else {
-            alert("Не найден python3 с PyMuPDF",
-                  "Установите зависимости:\n\npip3 install pymupdf\nbrew install tesseract tesseract-lang")
-            queue.removeAll(); return
+            showDependencyAlert(pythonMissing: true, tesseractMissing: !hasTesseract())
+            // очередь НЕ чистим: после установки зависимостей «Обработать» повторит попытку
+            updateControls(); return
         }
         guard hasTesseract() else {
-            alert("Не найден tesseract",
-                  "Установите:\n\nbrew install tesseract tesseract-lang")
-            queue.removeAll(); return
+            showDependencyAlert(pythonMissing: false, tesseractMissing: true)
+            updateControls(); return
         }
 
         let file = queue.removeFirst()
@@ -423,6 +425,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         a.informativeText = text
         a.alertStyle = .warning
         a.runModal()
+    }
+
+    /// Диалог про отсутствующие зависимости с кнопкой установки.
+    func showDependencyAlert(pythonMissing: Bool, tesseractMissing: Bool) {
+        let a = NSAlert()
+        a.messageText = pythonMissing ? "Не найден python3 с PyMuPDF"
+                                      : "Не найден tesseract (OCR)"
+        var lines: [String] = []
+        if pythonMissing { lines.append("• pip3 install --user pymupdf") }
+        if tesseractMissing { lines.append("• brew install tesseract tesseract-lang") }
+        a.informativeText = lines.joined(separator: "\n")
+            + "\n\nМожно установить сразу — откроется Терминал и выполнит команду."
+        a.alertStyle = .warning
+        a.addButton(withTitle: "Установить сейчас")
+        a.addButton(withTitle: "Отмена")
+        if a.runModal() == .alertFirstButtonReturn {
+            installDependencies(pythonMissing: pythonMissing, tesseractMissing: tesseractMissing)
+        }
+    }
+
+    /// Открывает Терминал с установкой того, чего не хватает.
+    func installDependencies(pythonMissing: Bool, tesseractMissing: Bool) {
+        var cmds: [String] = []
+        if pythonMissing {
+            cmds.append("/usr/bin/python3 -m pip install --user pymupdf")
+            cmds.append("/opt/homebrew/bin/python3 -m pip install pymupdf 2>/dev/null || true")
+        }
+        if tesseractMissing {
+            if FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/brew") {
+                cmds.append("/opt/homebrew/bin/brew install tesseract tesseract-lang")
+            } else {
+                cmds.append("echo 'Homebrew не найден. Установите с https://brew.sh, затем повторите.'")
+            }
+        }
+        guard !cmds.isEmpty else { return }
+        let script = cmds.joined(separator: " ; ")
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let apple = "tell application \"Terminal\"\nactivate\ndo script \"\(script)\"\nend tell"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", apple]
+        try? p.run()
+        appendLog("\n🛠  Открыт Терминал с установкой. Дождитесь окончания и нажмите «Обработать» ещё раз.\n")
     }
 }
 
