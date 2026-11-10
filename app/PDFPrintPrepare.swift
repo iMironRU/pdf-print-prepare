@@ -158,11 +158,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // ── UI ─────────────────────────────────────────────────────────────────
     func buildUI() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 660),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 580),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "Подготовка PDF к печати"
-        window.minSize = NSSize(width: 640, height: 560)
+        window.minSize = NSSize(width: 660, height: 520)
         // Центрируем на основном дисплее (у пользователя их несколько)
         if let screen = NSScreen.screens.first {
             let vf = screen.visibleFrame
@@ -274,7 +274,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func updateControls() {
-        runButton.isEnabled = !running && !queue.isEmpty
+        // «Обработать» активна, пока есть очередь или есть с чем перезапуститься
+        runButton.isEnabled = !running && (!queue.isEmpty || currentFile != nil)
         dropView.alphaValue = running ? 0.5 : 1
     }
 
@@ -398,7 +399,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func runTapped() {
-        if !queue.isEmpty { startNext() }
+        if !queue.isEmpty { startNext(); return }
+        // повторный запуск того же файла (результаты лягут в ту же папку)
+        if let f = currentFile { queue.append(f); startNext() }
     }
 
     @objc func openResult() {
