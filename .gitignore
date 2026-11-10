@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# сборка
+build/
+app/AppIcon.icns
+
+# python
+__pycache__/
+*.pyc
+
+# результаты работы
+*_print/
