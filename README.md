@@ -35,6 +35,12 @@
 
 ## Установка
 
+Готовое приложение: [Releases](https://github.com/iMironRU/pdf-print-prepare/releases/latest) →
+`PDFPrintPrepare-1.0.0.zip` → распаковать → перетащить в «Программы».
+Нужны только зависимости ниже (`setup.sh` проверит их).
+
+Сборка из исходников:
+
 ```bash
 git clone https://github.com/iMironRU/pdf-print-prepare.git
 cd pdf-print-prepare
